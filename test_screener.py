@@ -71,7 +71,32 @@ def test_simulate_wins_on_reversion_and_loses_on_continuation():
     dip_and_recover = s.simulate(s.add_indicators(frame(np.r_[RANGE, [97.5, 96, 97, 98.5, 100, 101]])), 0.0, False)
     crash = s.simulate(s.add_indicators(frame(np.r_[SELLOFF, np.linspace(89, 60, 30)])), 0.0, False)
     assert len(dip_and_recover) == 1 and dip_and_recover[0][0] == "LONG" and dip_and_recover[0][1] > 0
-    assert crash and all(side == "LONG" and -1.2 < r < -1.0 for side, r in crash)  # full stop plus fees
+    assert crash and all(side == "LONG" and -1.2 < r < -1.0 for side, r, _ in crash)  # full stop plus fees
+
+
+def test_funding_reduces_a_long_when_longs_pay():
+    df = s.add_indicators(frame(np.r_[RANGE, [97.5, 96, 97, 98.5, 100, 101]]))
+    (_, base_r, base_funding), = s.simulate(df, 0.0, False)
+    (_, paid_r, paid_funding), = s.simulate(df.assign(funding=0.001), 0.0, False)
+    assert base_funding == 0 and paid_funding < 0 and abs(paid_r - (base_r + paid_funding)) < 1e-9
+
+
+def test_add_funding_sums_the_hours_a_candle_was_open():
+    df = s.add_funding(frame([100, 100]), {3_600_000: 0.001, 7_200_000: 0.002}, "1h")
+    assert list(df["funding"]) == [0.001, 0.002]
+
+
+def test_position_size_risks_the_configured_share():
+    import config as cfg
+    import main
+    setup = s.Setup("BTC", "1h", "LONG", 100.0, 95.0, 110.0, 120.0, 2.0, 4.0, 20.0, 1.0, 5.0, False, 1e9)
+    cfg.ACCOUNT_SIZE, cfg.RISK_PER_TRADE_PCT = 0.0, 1.0
+    assert main.position(setup) is None
+    cfg.ACCOUNT_SIZE = 10_000.0
+    size, notional = main.position(setup)
+    assert abs(size * (setup.entry - setup.stop) - 100.0) < 1e-9 and abs(notional - 2_000.0) < 1e-9
+    assert main.net_rr(setup) < setup.rr
+    cfg.ACCOUNT_SIZE = 0.0
 
 
 def test_trade_stats():
