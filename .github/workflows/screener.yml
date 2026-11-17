@@ -2,7 +2,9 @@ name: Screener
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # every 15 minutes (free on a public repo)
+    # Every 15 minutes, offset from :00 because GitHub drops scheduled runs most often at the top of the hour.
+    # Schedules are best-effort; see README for a reliable external trigger.
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
 permissions:
