@@ -109,8 +109,21 @@ The included GitHub Actions workflow runs `python main.py --once` every 15 minut
 2. Optionally add a `DISCORD_WEBHOOK_URL` repository secret for alerts.
 3. Run `git pull` before `python main.py --report` to get the latest log.
 
-Scheduled runs on GitHub often start several minutes late. A 15-minute schedule fits the free tier
-only on a public repository; on a private one, use `"5 * * * *"` (hourly).
+GitHub treats schedules as best-effort: runs start late, and under load many are dropped outright
+(on this repo, one scheduled run fired in its first eleven hours). The workflow avoids the top of the
+hour, which helps but does not guarantee anything. For reliable runs, trigger it from an external
+scheduler instead: a free service such as cron-job.org can send this request every 15 minutes,
+using a fine-grained token scoped to this repository with **Actions: read and write** only.
+
+```
+POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/screener.yml/dispatches
+Authorization: Bearer <token>
+Accept: application/vnd.github+json
+
+{"ref": "main"}
+```
+
+A 15-minute schedule fits the free tier only on a public repository; on a private one, run hourly.
 
 ## Limitations
 
