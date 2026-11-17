@@ -1,4 +1,5 @@
 hyperliquid-python-sdk
 pandas
+numpy
 rich
 requests
