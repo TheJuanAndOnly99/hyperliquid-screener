@@ -2,7 +2,7 @@ name: Screener
 
 on:
   schedule:
-    - cron: "5 * * * *"  # hourly, just after each 1h candle closes (UTC)
+    - cron: "*/15 * * * *"  # every 15 minutes (free on a public repo)
   workflow_dispatch:
 
 permissions:
