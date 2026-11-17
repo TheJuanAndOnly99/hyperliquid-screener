@@ -28,6 +28,20 @@ def exit_by(opened: datetime, timeframe: str) -> datetime:
     return opened + timedelta(milliseconds=cfg.MAX_HOLD_BARS * cfg.INTERVAL_MS[timeframe])
 
 
+def net_rr(s: Setup) -> float:
+    """TP1 reward / risk after taker fees on entry and exit."""
+    fees = 2 * cfg.TAKER_FEE * s.entry
+    return (abs(s.tp1 - s.entry) - fees) / (abs(s.entry - s.stop) + fees)
+
+
+def position(s: Setup) -> tuple[float, float] | None:
+    """(size in coins, notional in USD) that loses RISK_PER_TRADE_PCT of the account at the stop, or None if off."""
+    if cfg.ACCOUNT_SIZE <= 0:
+        return None
+    size = cfg.ACCOUNT_SIZE * cfg.RISK_PER_TRADE_PCT / 100 / abs(s.entry - s.stop)
+    return size, size * s.entry
+
+
 def ci_text(r: dict) -> str:
     return f"{r['ci_low']:+.2f} to {r['ci_high']:+.2f}" if r["trades"] >= 2 else "-"
 
@@ -107,7 +121,7 @@ def log_summary(rows: list[dict]) -> list[dict]:
 def build_report_view(rows: list[dict], errors: list[str]) -> Group:
     counts = {s: sum(r["status"] == s for r in rows) for s in ("OPEN", "TP1", "STOP", "TIMEOUT", "UNRESOLVED")}
     parts = [
-        stats_table(f"Forward test: {cfg.SETUP_LOG_PATH} (net of taker fees, funding excluded)", log_summary(rows)),
+        stats_table(f"Forward test: {cfg.SETUP_LOG_PATH} (net of taker fees and funding)", log_summary(rows)),
         Text(" | ".join(f"{k}: {v}" for k, v in counts.items()) + " | compare with: python main.py --backtest", style="dim"),
     ]
     if errors:
@@ -132,11 +146,19 @@ def build_watch_table(watch: list[dict]) -> Table:
     return table
 
 
+def size_cells(s: Setup) -> tuple[str, ...]:
+    pos = position(s)
+    if not pos:
+        return ()
+    return f"{pos[0]:,.4g}", f"${pos[1]:,.0f} ({pos[1] / cfg.ACCOUNT_SIZE:.1f}x)"
+
+
 def build_view(setups: list[Setup], watch: list[dict], perps: list[dict], errors: list[str],
                seen: dict[str, datetime], log_rows: list[dict], live: bool = True) -> Group:
     table = Table(title="Hyperliquid Mean-Reversion Screener", expand=True)
-    cols = ("Coin", "TF", "Side", "Entry", "Stop", "TP1 (SMA)", "TP2 (Band)", "R/R", "R/R TP2", "RSI",
-            "Funding APR", "24h Vol", "Exit by")
+    sizing = cfg.ACCOUNT_SIZE > 0
+    cols = ("Coin", "TF", "Side", "Entry", "Stop", "TP1 (SMA)", "TP2 (Band)", "R/R", "Net R/R", "R/R TP2", "RSI",
+            "Funding APR", "24h Vol", *(("Size", "Notional") if sizing else ()), "Exit by")
     for col in cols:
         table.add_column(col, justify="left" if col in ("Coin", "TF", "Side") else "right")
     for s in setups:
@@ -146,8 +168,8 @@ def build_view(setups: list[Setup], watch: list[dict], perps: list[dict], errors
         table.add_row(
             s.coin, s.timeframe, Text(s.side, style=f"bold {color}"),
             px(s.entry), px(s.stop), px(s.tp1), px(s.tp2),
-            Text(f"{s.rr:.2f}", style="bold" if s.rr >= 1 else "dim"), f"{s.rr2:.2f}",
-            f"{s.rsi:.1f}", funding, f"${s.volume_24h / 1e6:,.0f}M",
+            Text(f"{s.rr:.2f}", style="bold" if s.rr >= 1 else "dim"), f"{net_rr(s):.2f}", f"{s.rr2:.2f}",
+            f"{s.rsi:.1f}", funding, f"${s.volume_24h / 1e6:,.0f}M", *size_cells(s),
             f"{exit_by(seen.get(s.key, datetime.now()), s.timeframe).astimezone():%a %H:%M}",
         )
     if not setups:
@@ -156,6 +178,8 @@ def build_view(setups: list[Setup], watch: list[dict], perps: list[dict], errors
     status = (f"{datetime.now():%Y-%m-%d %H:%M:%S} | {len(setups)} setup(s) across {len(perps)} perps "
               f"on {'/'.join(cfg.TIMEFRAMES)} | {f'refresh every {cfg.REFRESH_SECONDS}s | ' if live else ''}"
               f"read-only, not financial advice")
+    if sizing:
+        status += f" | sizing: {cfg.RISK_PER_TRADE_PCT:g}% of ${cfg.ACCOUNT_SIZE:,.0f} at risk per trade"
     parts = [table, *([build_watch_table(watch)] if watch else []), Text(status, style="dim")]
     if log_rows:
         overall = log_summary(log_rows)[0]
@@ -169,7 +193,8 @@ def build_view(setups: list[Setup], watch: list[dict], perps: list[dict], errors
 
 
 def build_backtest_view(grid: list[dict], breakdown: list[dict], errors: list[str]) -> Group:
-    table = Table(title="Backtest: exit at stop, TP1 or timeout, net of taker fees (funding excluded)", expand=True)
+    costs = "taker fees and funding" if cfg.BACKTEST_FUNDING else "taker fees (funding excluded)"
+    table = Table(title=f"Backtest: exit at stop, TP1 or timeout, net of {costs}", expand=True)
     for col in ("TF", "History", "Trend filter", "Min R/R", "Trades", "Win rate", "Avg R", "95% CI of avg R", "Total R"):
         table.add_column(col, justify="left" if col in ("TF", "Trend filter") else "right")
     for r in grid:
@@ -197,8 +222,10 @@ def send_discord(setups: list[Setup], seen: dict[str, datetime]) -> None:
         return
     lines = [
         f"**{s.side} {s.coin}** ({s.timeframe}) entry {px(s.entry)} | SL {px(s.stop)} | TP1 {px(s.tp1)} | "
-        f"TP2 {px(s.tp2)} | R/R {s.rr:.2f} | RSI {s.rsi:.1f} | funding {s.funding_apr:+.1f}% "
-        f"({'pays' if s.funding_pays else 'costs'}) | exit by {exit_by(seen[s.key], s.timeframe).astimezone():%a %H:%M %Z}"
+        f"TP2 {px(s.tp2)} | R/R {s.rr:.2f} (net {net_rr(s):.2f}) | RSI {s.rsi:.1f} | funding {s.funding_apr:+.1f}% "
+        f"({'pays' if s.funding_pays else 'costs'})"
+        + (f" | size {position(s)[0]:,.4g} (${position(s)[1]:,.0f})" if position(s) else "")
+        + f" | exit by {exit_by(seen[s.key], s.timeframe).astimezone():%a %H:%M %Z}"
         for s in setups
     ]
     try:

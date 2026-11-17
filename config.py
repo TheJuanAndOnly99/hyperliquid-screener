@@ -33,6 +33,10 @@ ATR_SL_MULT = 1.5
 SWING_LOOKBACK = 10  # candles used for the recent swing low/high
 MIN_RR = 1.0         # drop setups whose TP1 R/R is below this
 
+# Position sizing: shown on the dashboard and in alerts when ACCOUNT_SIZE > 0
+ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "0"))  # account equity in USD; 0 = sizing off
+RISK_PER_TRADE_PCT = 1.0  # percent of the account lost if the stop is hit
+
 # Watchlist: coins close to triggering
 WATCH_RSI_MARGIN = 8.0  # RSI within this many points of the threshold
 WATCH_BAND_PCT = 0.5    # price within this % of the band (or already beyond it)
@@ -46,6 +50,8 @@ BOOTSTRAP_SAMPLES = 2000           # resamples for the 95% interval on average R
 BACKTEST_MIN_RR_GRID = (0.0, 0.5, 0.75, 1.0)
 MAX_HOLD_BARS = 24                 # time exit: close after this many bars if neither stop nor TP1 is hit
 TAKER_FEE = 0.00045                # per side, charged on entry and exit
+BACKTEST_FUNDING = True             # include historical funding payments (adds a few minutes of API calls)
+FUNDING_PAGE_SLEEP = 1.0           # seconds between funding-history pages (500 hourly records each)
 
 # Funding (Hyperliquid funding is paid hourly)
 FUNDING_PERIODS_PER_YEAR = 24 * 365

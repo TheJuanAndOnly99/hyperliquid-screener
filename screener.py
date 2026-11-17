@@ -10,6 +10,7 @@ from hyperliquid.utils import constants
 
 import config as cfg
 
+HOUR_MS = 3_600_000
 INDICATOR_COLS = ("sma", "bb_upper", "bb_lower", "rsi", "atr", "swing_low", "swing_high", "adx", "plus_di", "minus_di")
 
 
@@ -84,6 +85,27 @@ def fetch_candles(info: Info, coin: str, interval: str, limit: int | None = None
     if closed_only:
         df = df[df["close_time"] <= end]
     return df.sort_values("time").reset_index(drop=True)
+
+
+def fetch_funding(info: Info, coin: str, start_ms: int, end_ms: int) -> dict[int, float]:
+    """Hourly funding rates keyed by the hour (ms) they were charged. Positive = longs pay shorts."""
+    rates, cursor = {}, start_ms
+    while cursor < end_ms:
+        page = _retry(info.funding_history, coin, cursor, end_ms)
+        for rec in page or []:
+            rates[rec["time"] // HOUR_MS * HOUR_MS] = float(rec["fundingRate"])
+        if not page or len(page) < 500:
+            break
+        cursor = page[-1]["time"] + 1
+        time.sleep(cfg.FUNDING_PAGE_SLEEP)
+    return rates
+
+
+def add_funding(df: pd.DataFrame, rates: dict[int, float], interval: str) -> pd.DataFrame:
+    """Adds a `funding` column: the sum of the hourly rates charged while each candle was open."""
+    hours = range(1, cfg.INTERVAL_MS[interval] // HOUR_MS + 1)
+    df["funding"] = [sum(rates.get(int(t) + h * HOUR_MS, 0.0) for h in hours) for t in df["time"]]
+    return df
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -216,10 +238,12 @@ def scan(info: Info | None = None) -> tuple[list[Setup], list[dict], list[dict],
             sorted(watch, key=lambda w: w["dist_pct"]), perps, errors)
 
 
-def simulate(df: pd.DataFrame, min_rr: float, trend_filter: bool) -> list[tuple[str, float]]:
-    """(side, net R multiple) of each trade: enter at the signal candle's close, exit at stop, TP1 or timeout.
+def simulate(df: pd.DataFrame, min_rr: float, trend_filter: bool) -> list[tuple[str, float, float]]:
+    """(side, net R, funding R) per trade: enter at the signal candle's close, exit at stop, TP1 or timeout.
 
-    One trade at a time; if a bar touches both stop and TP1 the stop is assumed to fill first.
+    Net R includes taker fees and, when the frame has a `funding` column, funding payments;
+    funding R is that funding part alone (negative = a cost). One trade at a time; if a bar
+    touches both stop and TP1 the stop is assumed to fill first.
     """
     rows, results, free = df.to_dict("records"), [], 0
     signal = ((df["close"] <= df["bb_lower"]) & (df["rsi"] < cfg.RSI_LONG_MAX)) | (
@@ -242,7 +266,9 @@ def simulate(df: pd.DataFrame, min_rr: float, trend_filter: bool) -> list[tuple[
             if (favorable - tp1) * sign >= 0:
                 exit_px = tp1
                 break
-        results.append((plan["side"], ((exit_px - entry) * sign - 2 * cfg.TAKER_FEE * entry) / plan["risk"]))
+        funding_r = -sign * sum(rows[k].get("funding", 0.0) for k in range(i + 1, j + 1)) * entry / plan["risk"]
+        price_r = ((exit_px - entry) * sign - 2 * cfg.TAKER_FEE * entry) / plan["risk"]
+        results.append((plan["side"], price_r + funding_r, funding_r))
         free = j + 1
     return results
 
@@ -270,8 +296,11 @@ def backtest(info: Info | None = None) -> tuple[list[dict], list[dict], list[str
     for perp in top_perps(info):
         for tf in cfg.TIMEFRAMES:
             try:
-                data[tf].append((perp["coin"], add_indicators(
-                    fetch_candles(info, perp["coin"], tf, cfg.BACKTEST_CANDLES, closed_only=True))))
+                df = add_indicators(fetch_candles(info, perp["coin"], tf, cfg.BACKTEST_CANDLES, closed_only=True))
+                if cfg.BACKTEST_FUNDING and not df.empty:
+                    rates = fetch_funding(info, perp["coin"], int(df["time"].iloc[0]), int(time.time() * 1000))
+                    df = add_funding(df, rates, tf)
+                data[tf].append((perp["coin"], df))
             except Exception as exc:
                 errors.append(f"{perp['coin']} {tf}: {str(exc)[:80]}")
             time.sleep(cfg.REQUEST_SLEEP)
@@ -281,11 +310,15 @@ def backtest(info: Info | None = None) -> tuple[list[dict], list[dict], list[str
         days = max((len(f) for _, f in frames), default=0) * cfg.INTERVAL_MS[tf] / 86_400_000
         for trend_filter in (False, True):
             for min_rr in cfg.BACKTEST_MIN_RR_GRID:
-                rs = [r for _, f in frames for _, r in simulate(f, min_rr, trend_filter)]
+                rs = [r for _, f in frames for _, r, _ in simulate(f, min_rr, trend_filter)]
                 grid.append({"timeframe": tf, "days": days, "trend_filter": trend_filter, "min_rr": min_rr,
                              **trade_stats(rs)})
-        trades = [(coin, side, r) for coin, f in frames for side, r in simulate(f, cfg.MIN_RR, cfg.TREND_FILTER)]
+        sims = [(coin, simulate(f, cfg.MIN_RR, cfg.TREND_FILTER)) for coin, f in frames]
+        trades = [(coin, side, r) for coin, sim in sims for side, r, _ in sim]
         breakdown.append({"group": f"{tf} ALL", **trade_stats([r for _, _, r in trades])})
+        if cfg.BACKTEST_FUNDING:
+            breakdown.append({"group": f"{tf} ALL before funding",
+                              **trade_stats([r - fr for _, sim in sims for _, r, fr in sim])})
         for side in ("LONG", "SHORT"):
             breakdown.append({"group": f"{tf} {side}", **trade_stats([r for _, s, r in trades if s == side])})
         by_coin = [{"group": f"{tf} {coin}", **trade_stats([r for c, _, r in trades if c == coin])} for coin, _ in frames]
@@ -297,7 +330,8 @@ def resolve_outcome(info: Info, coin: str, timeframe: str, side: str, entry: flo
                     tp1: float, opened_ms: int) -> dict | None:
     """Outcome of a logged setup from fine-grained candles since it opened, or None if still open.
 
-    Same exit rules and fee model as the backtest: stop, TP1, or close after MAX_HOLD_BARS.
+    Same exit rules and cost model as the backtest: stop, TP1, or close after MAX_HOLD_BARS,
+    net of taker fees and funding.
     """
     now = int(time.time() * 1000)
     deadline = opened_ms + cfg.MAX_HOLD_BARS * cfg.INTERVAL_MS[timeframe]
@@ -322,6 +356,8 @@ def resolve_outcome(info: Info, coin: str, timeframe: str, side: str, entry: flo
         if df.empty:  # too old to fetch at this candle size
             return {"status": "UNRESOLVED", "exit_price": "", "r_result": "", "closed_at": ""}
         status, exit_px, closed_ms = "TIMEOUT", float(df.iloc[-1]["close"]), deadline
-    r = ((exit_px - entry) * sign - 2 * cfg.TAKER_FEE * entry) / abs(entry - stop)
+    risk = abs(entry - stop)
+    funding = sum(fetch_funding(info, coin, opened_ms, int(closed_ms)).values())
+    r = ((exit_px - entry) * sign - 2 * cfg.TAKER_FEE * entry - sign * funding * entry) / risk
     return {"status": status, "exit_price": exit_px, "r_result": round(r, 4),
             "closed_at": datetime.fromtimestamp(closed_ms / 1000).astimezone().isoformat(timespec="seconds")}
