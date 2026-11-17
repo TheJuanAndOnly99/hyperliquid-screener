@@ -1,10 +1,13 @@
-"""Settings for the read-only Hyperliquid mean-reversion screener."""
+"""Settings for the read-only Hyperliquid mean-reversion screener.
+
+Defaults are the variant that held up best in the backtest (see README); the edge is unproven.
+"""
 import os
 
 # Universe / data
 TOP_N = 20
 TIMEFRAMES = ("1h",)  # 4h dropped: no variant survived out-of-sample; add "4h" back to scan it
-CANDLE_LIMIT = 100
+CANDLE_LIMIT = 100    # candles per symbol for the live scan
 REQUEST_SLEEP = 0.2  # seconds between candle requests
 MAX_RETRIES = 3      # per API call, with exponential backoff
 RETRY_BACKOFF = 1.0  # seconds; doubles on each retry
@@ -28,7 +31,7 @@ ADX_MAX = 30.0
 # Trade plan
 ATR_SL_MULT = 1.5
 SWING_LOOKBACK = 10  # candles used for the recent swing low/high
-MIN_RR = 1.0         # drop setups whose TP1 R/R is below this (least-bad value in the backtest)
+MIN_RR = 1.0         # drop setups whose TP1 R/R is below this
 
 # Watchlist: coins close to triggering
 WATCH_RSI_MARGIN = 8.0  # RSI within this many points of the threshold
@@ -41,12 +44,12 @@ SETUP_LOG_PATH = "setups_log.csv"
 BACKTEST_CANDLES = 5000            # per symbol and timeframe (API max 5000)
 BOOTSTRAP_SAMPLES = 2000           # resamples for the 95% interval on average R
 BACKTEST_MIN_RR_GRID = (0.0, 0.5, 0.75, 1.0)
-MAX_HOLD_BARS = 24                 # exit at close if neither stop nor TP1 is hit
-TAKER_FEE = 0.00045                # per side
+MAX_HOLD_BARS = 24                 # time exit: close after this many bars if neither stop nor TP1 is hit
+TAKER_FEE = 0.00045                # per side, charged on entry and exit
 
 # Funding (Hyperliquid funding is paid hourly)
 FUNDING_PERIODS_PER_YEAR = 24 * 365
 
 # Runtime
-REFRESH_SECONDS = 300
+REFRESH_SECONDS = 300  # live dashboard loop
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")  # empty = alerts off

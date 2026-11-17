@@ -1,4 +1,4 @@
-"""Live terminal dashboard for the Hyperliquid mean-reversion screener."""
+"""Terminal dashboard, Discord alerts, forward-test log and reports for the Hyperliquid screener."""
 import argparse
 import csv
 import os
@@ -133,7 +133,7 @@ def build_watch_table(watch: list[dict]) -> Table:
 
 
 def build_view(setups: list[Setup], watch: list[dict], perps: list[dict], errors: list[str],
-               seen: dict[str, datetime], log_rows: list[dict]) -> Group:
+               seen: dict[str, datetime], log_rows: list[dict], live: bool = True) -> Group:
     table = Table(title="Hyperliquid Mean-Reversion Screener", expand=True)
     cols = ("Coin", "TF", "Side", "Entry", "Stop", "TP1 (SMA)", "TP2 (Band)", "R/R", "R/R TP2", "RSI",
             "Funding APR", "24h Vol", "Exit by")
@@ -154,7 +154,8 @@ def build_view(setups: list[Setup], watch: list[dict], perps: list[dict], errors
         table.add_row(*["-"] * len(cols))
 
     status = (f"{datetime.now():%Y-%m-%d %H:%M:%S} | {len(setups)} setup(s) across {len(perps)} perps "
-              f"on {'/'.join(cfg.TIMEFRAMES)} | refresh every {cfg.REFRESH_SECONDS}s | read-only, not financial advice")
+              f"on {'/'.join(cfg.TIMEFRAMES)} | {f'refresh every {cfg.REFRESH_SECONDS}s | ' if live else ''}"
+              f"read-only, not financial advice")
     parts = [table, *([build_watch_table(watch)] if watch else []), Text(status, style="dim")]
     if log_rows:
         overall = log_summary(log_rows)[0]
@@ -206,7 +207,7 @@ def send_discord(setups: list[Setup], seen: dict[str, datetime]) -> None:
         Console(stderr=True).print(f"[red]Discord alert failed: {exc}[/red]")
 
 
-def run_scan(info, seen: dict[str, datetime], strict: bool = False) -> Group:
+def run_scan(info, seen: dict[str, datetime], once: bool = False) -> Group:
     """One scan. `seen` maps setup key -> first-seen time.
 
     A setup is logged and alerted once: not again while it stays on screen, and not while the
@@ -215,7 +216,7 @@ def run_scan(info, seen: dict[str, datetime], strict: bool = False) -> Group:
     try:
         setups, watch, perps, errors = screener.scan(info)
     except Exception as exc:  # keep the loop alive through API outages
-        if strict:  # --once: exit non-zero so a scheduled run shows as failed
+        if once:  # exit non-zero so a scheduled run shows as failed
             raise
         return Group(Text(f"{datetime.now():%H:%M:%S} scan failed: {str(exc)[:200]}", style="red"))
     now, log_rows = datetime.now().astimezone(), []  # timezone-aware, so the log is portable across machines
@@ -234,7 +235,7 @@ def run_scan(info, seen: dict[str, datetime], strict: bool = False) -> Group:
     except OSError as exc:
         errors.append(f"setup log: {exc}")
     send_discord(new, seen)
-    return build_view(setups, watch, perps, errors, seen, log_rows)
+    return build_view(setups, watch, perps, errors, seen, log_rows, live=not once)
 
 
 def main() -> None:
@@ -259,7 +260,7 @@ def main() -> None:
         console.print(view)
     elif args.once:
         with console.status("Scanning..."):
-            view = run_scan(info, seen, strict=True)
+            view = run_scan(info, seen, once=True)
         console.print(view)
     else:
         try:
