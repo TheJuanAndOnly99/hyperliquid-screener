@@ -1,9 +1,9 @@
 name: Screener
 
 on:
+  # Primary trigger: an external scheduler calls workflow_dispatch every 15 minutes (see README).
+  # GitHub's own schedule is kept only as a fallback; it fires a few times a day at best.
   schedule:
-    # Every 15 minutes, offset from :00 because GitHub drops scheduled runs most often at the top of the hour.
-    # Schedules are best-effort; see README for a reliable external trigger.
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
@@ -19,7 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Check out the latest main, not the commit the run was queued on, so a run that waited
+      # behind another one sees that run's log update.
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -38,4 +42,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -q -m "Update setups log"
-          git push -q
+          for attempt in 1 2 3; do
+            git pull -q --rebase origin main && git push -q && exit 0
+            git rebase --abort 2>/dev/null || true
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not save setups_log.csv after 3 attempts"
+          exit 1

@@ -109,19 +109,29 @@ The included GitHub Actions workflow runs `python main.py --once` every 15 minut
 2. Optionally add a `DISCORD_WEBHOOK_URL` repository secret for alerts.
 3. Run `git pull` before `python main.py --report` to get the latest log.
 
-GitHub treats schedules as best-effort: runs start late, and under load many are dropped outright
-(on this repo, one scheduled run fired in its first eleven hours). The workflow avoids the top of the
-hour, which helps but does not guarantee anything. For reliable runs, trigger it from an external
-scheduler instead: a free service such as cron-job.org can send this request every 15 minutes,
-using a fine-grained token scoped to this repository with **Actions: read and write** only.
+GitHub treats schedules as best-effort and drops most runs on a low-activity repo (this one saw two
+to four scheduled runs a day instead of 96). The workflow therefore expects an **external scheduler**
+to start it every 15 minutes; the built-in schedule stays only as a fallback.
+
+To set one up:
+
+1. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
+   with **Repository access** set to this repository only and a single permission, **Actions: Read and
+   write**. It can start workflows here and nothing else.
+2. In a free scheduler such as [cron-job.org](https://cron-job.org), add a job that runs every 15
+   minutes and sends:
 
 ```
 POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/screener.yml/dispatches
 Authorization: Bearer <token>
 Accept: application/vnd.github+json
+Content-Type: application/json
 
 {"ref": "main"}
 ```
+
+GitHub answers `204 No Content` when the run is accepted. Runs are queued one at a time, and each
+starts from the latest `main`, so overlapping triggers are harmless.
 
 A 15-minute schedule fits the free tier only on a public repository; on a private one, run hourly.
 
